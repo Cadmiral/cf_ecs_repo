@@ -1,0 +1,236 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: "This template deploys services for a web application running in ECS and 
+requires the Outputs from network-stack.yaml.  It deploys an ECS Service, a task definition 
+for our reverse proxy, a task definition for our web application, a DiscoveryServicefor for 
+private DNS resolution and a LogGroup for service logs."
+
+Parameters:
+  pNetworkStackName:
+    Type: String
+    MinLength: 1
+    Description: The name of the network-stack.yaml stack
+  pNginxServiceName:
+    Type: String
+    MinLength: 1
+    Description: A human-readable name for the service
+  pNginxImageUrl:
+    Type: String
+    MinLength: 1
+    Description: The url of the nginx docker image.  
+  pWebAppImageUrl:
+    Type: String
+    MinLength: 1
+    Description: The url of the webapp docker image.  
+  pContainerCpu:
+    Type: Number
+    MinValue: 256
+    Default: 256
+    Description: How much CPU to give the container. 1024 is 1 CPU.
+  pContainerMemory:
+    Type: Number
+    MinValue: 512
+    Default: 512
+    Description: How much memory in megabytes to give the container.
+  pNginxDesiredCount:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 10
+    Description: How many copies of the nginx service task to run.
+  pWebAppDesiredCount:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 10
+    Description: How many copies of the webapp service task to run.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label: 
+          default: Required Parameters
+        Parameters:
+          - pNetworkStackName
+          - pNginxServiceName
+          - pNginxImageUrl
+          - pWebAppImageUrl
+      -
+        Label: 
+          default: Optional Parameters
+        Parameters:
+          - pContainerCpu
+          - pContainerMemory
+          - pNginxDesiredCount
+          - pWebAppDesiredCount
+    ParameterLabels:
+      pNetworkStackName: 
+        default: The name of the network-stack.yaml stack
+      pNginxServiceName: 
+        default: The name used for the nginx container and associated log groups
+      pNginxImageUrl: 
+        default: The url of the nginx docker image.  
+      pWebAppImageUrl: 
+        default: The url of the webapp docker image. 
+      pContainerCpu: 
+        default: How much CPU to give the container. 1024 is 1 CPU.
+      pContainerMemory: 
+        default: How much memory in megabytes to give the container.
+      pNginxDesiredCount: 
+        default: How many copies of the nginx service task to run.
+      pWebAppDesiredCount: 
+        default: How many copies of the webapp service task to run.
+
+Resources:
+  webAppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      TargetType: ip
+      Name: nginx
+      Port: 80
+      Protocol: HTTP
+      HealthCheckPath: /
+      VpcId:
+        Fn::ImportValue: !Sub ${pNetworkStackName}:VPCId
+
+  loadBalancerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref webAppTargetGroup
+          Type: forward
+      Conditions:
+        - Field: path-pattern
+          Values: ["*"]
+      ListenerArn:
+        Fn::ImportValue: !Sub ${pNetworkStackName}:PublicListener
+      Priority: 1
+
+  logGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Ref pNginxServiceName
+      RetentionInDays: 1
+
+  nginxTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref pNginxServiceName
+      Cpu: !Ref pContainerCpu
+      Memory: !Ref pContainerMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn:
+        Fn::ImportValue: !Sub ${pNetworkStackName}:ECSTaskExecutionRole
+      ContainerDefinitions:
+        - Name: !Ref pNginxServiceName
+          Cpu: !Ref pContainerCpu
+          Memory: !Ref pContainerMemory
+          Image: !Ref pNginxImageUrl
+          PortMappings:
+            - ContainerPort: 80
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref pNginxServiceName
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: !Ref pNginxServiceName
+
+  webAppTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: webapp
+      Cpu: !Ref pContainerCpu
+      Memory: !Ref pContainerMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn:
+        Fn::ImportValue: !Sub ${pNetworkStackName}:ECSTaskExecutionRole
+      ContainerDefinitions:
+        - Name: webapp
+          Cpu: !Ref pContainerCpu
+          Memory: !Ref pContainerMemory
+          Image: !Ref pWebAppImageUrl
+          PortMappings:
+            - ContainerPort: 3000
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref pNginxServiceName
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: !Ref pNginxServiceName
+
+  nginxECSService:
+    Type: AWS::ECS::Service
+    DependsOn: loadBalancerRule
+    Properties:
+      ServiceName: !Ref pNginxServiceName
+      Cluster:
+        Fn::ImportValue: !Sub ${pNetworkStackName}:ClusterName
+      LaunchType: FARGATE
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 50
+      DesiredCount: !Ref pNginxDesiredCount
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - Fn::ImportValue: !Sub ${pNetworkStackName}:ECSSecurityGroup
+          Subnets:
+            - Fn::ImportValue: !Sub ${pNetworkStackName}:privateSubnet1
+            - Fn::ImportValue: !Sub ${pNetworkStackName}:privateSubnet2
+      TaskDefinition: !Ref nginxTaskDefinition
+      LoadBalancers:
+        - ContainerName: nginx
+          ContainerPort: 80
+          TargetGroupArn: !Ref webAppTargetGroup
+
+  webAppECSService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: webapp
+      Cluster:
+        Fn::ImportValue: !Sub ${pNetworkStackName}:ClusterName
+      LaunchType: FARGATE
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 50
+      DesiredCount: !Ref pWebAppDesiredCount
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - Fn::ImportValue: !Sub ${pNetworkStackName}:ECSSecurityGroup
+          Subnets:
+            - Fn::ImportValue: !Sub ${pNetworkStackName}:privateSubnet1
+            - Fn::ImportValue: !Sub ${pNetworkStackName}:privateSubnet2
+      TaskDefinition: !Ref webAppTaskDefinition
+      ServiceRegistries:
+        - RegistryArn: !GetAtt discoveryService.Arn
+          Port: 3000
+
+  privateNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+        Name: mywebapp.com
+        Vpc:         
+          Fn::ImportValue: !Sub ${pNetworkStackName}:VPCId
+
+  discoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties: 
+      Description: Discovery Service for the Demo Application
+      DnsConfig:
+        RoutingPolicy: MULTIVALUE
+        DnsRecords:
+          - TTL: 60
+            Type: A
+          - TTL: 60
+            Type: SRV
+      HealthCheckCustomConfig: 
+        FailureThreshold: 1
+      Name: webapp
+      NamespaceId: !Ref privateNamespace
