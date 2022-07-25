@@ -1,5 +1,5 @@
 [![Infrastruture Diagram](https://github.com/Cadmiral/cf_ecs_repo/blob/main/ecs-webapp.png?raw=true)](https://github.com/Cadmiral/cf_ecs_repo/blob/main/ecs-webapp.png?raw=true)
-# AWS CDK - Web App running on ECS Fargate 
+# AWS CloudFormation - Web App running on ECS Fargate 
 
 ## What is it?
 
